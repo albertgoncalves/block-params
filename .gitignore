@@ -1,0 +1,9 @@
+*
+!.gitignore
+!Cargo.toml
+
+!src/
+!*.rs
+
+!scripts/
+!*.sh

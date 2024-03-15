@@ -2,7 +2,7 @@ use crate::op::Op;
 use crate::prelude::write_delim;
 use std::fmt;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Ident<'a>(pub &'a str, pub Option<usize>);
 
 #[derive(Clone)]
@@ -84,11 +84,5 @@ impl fmt::Display for Inst<'_> {
             Self::Return(Some(immediate)) => write!(f, "    return({immediate})"),
             Self::Return(None) => write!(f, "    return()"),
         }
-    }
-}
-
-impl Inst<'_> {
-    pub const fn is_label(&self) -> bool {
-        matches!(self, Inst::Label(..))
     }
 }

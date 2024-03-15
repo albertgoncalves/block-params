@@ -5,6 +5,7 @@ mod op;
 mod prelude;
 
 use lower::IntoInsts;
+use std::collections::HashSet;
 
 fn main() {
     let named_func = ast::NamedFunc(
@@ -50,12 +51,9 @@ fn main() {
     let mut state = lower::State::new();
     named_func.into_insts(&mut state);
 
-    let blocks = state.split_blocks();
-    for block in blocks {
-        println!("    {}:", block.label);
-        for inst in block.insts {
-            println!("    {inst}");
-        }
-        println!();
-    }
+    let globals = HashSet::from(["console.log"]);
+
+    let mut blocks = state.split_blocks();
+    blocks.walk(&globals);
+    println!("{blocks}");
 }

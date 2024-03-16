@@ -2,7 +2,7 @@
 
 set -eu
 
-rustfmt src/*.rs
+rustfmt --color always src/*.rs
 cargo clippy --color always --all --all-targets -- \
     -W clippy::all \
     -W clippy::complexity \

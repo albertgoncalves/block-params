@@ -4,7 +4,6 @@ mod lower;
 mod op;
 mod prelude;
 
-use lower::IntoInsts;
 use std::collections::HashSet;
 
 fn main() {
@@ -49,7 +48,7 @@ fn main() {
     println!("{named_func}\n");
 
     let mut state = lower::State::new();
-    named_func.into_insts(&mut state);
+    named_func.push_insts(&mut state);
 
     let globals = HashSet::from(["console.log"]);
 

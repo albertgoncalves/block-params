@@ -21,6 +21,11 @@ pub struct State<'a> {
     stack: Vec<Scope<'a>>,
 }
 
+type Globals<'a> = HashSet<&'a str>;
+type Strings<'a> = Vec<&'a str>;
+type Locals<'a> = HashMap<&'a str, usize>;
+type Labels<'a> = HashMap<ir::Ident<'a>, Vec<ir::User<'a>>>;
+
 impl fmt::Display for Blocks<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for block in &self.0 {
@@ -33,10 +38,6 @@ impl fmt::Display for Blocks<'_> {
         Ok(())
     }
 }
-
-type Globals<'a> = HashSet<&'a str>;
-type Strings<'a> = Vec<&'a str>;
-type Locals<'a> = HashMap<&'a str, usize>;
 
 impl<'a> ir::User<'a> {
     fn visited(&self, globals: &Globals<'a>, strings: &mut Strings<'a>) {
@@ -125,8 +126,6 @@ impl<'a> ir::Value<'a> {
         }
     }
 }
-
-type Labels<'a> = HashMap<ir::Ident<'a>, Vec<ir::User<'a>>>;
 
 impl<'a> ir::Label<'a> {
     fn visited(&self, globals: &Globals<'a>, strings: &mut Strings<'a>) {
@@ -356,20 +355,8 @@ impl<'a> State<'a> {
     }
 }
 
-pub trait IntoInsts<'a> {
-    fn into_insts(self, state: &mut State<'a>);
-}
-
-pub trait IntoImmediate<'a> {
-    fn into_immediate(self, state: &mut State<'a>) -> ir::Immediate<'a>;
-}
-
-pub trait IntoValue<'a> {
-    fn into_value(self, state: &mut State<'a>) -> ir::Value<'a>;
-}
-
-impl<'a> IntoInsts<'a> for &ast::NamedFunc<'a> {
-    fn into_insts(self, state: &mut State<'a>) {
+impl<'a> ast::NamedFunc<'a> {
+    pub fn push_insts(&self, state: &mut State<'a>) {
         let args = (self.1 .0)
             .iter()
             .map(|string| ir::User(string, None))
@@ -378,36 +365,34 @@ impl<'a> IntoInsts<'a> for &ast::NamedFunc<'a> {
             ir::Ident::User(ir::User(self.0, None)),
             args,
         )));
-        self.1 .1.into_insts(state);
+        self.1 .1.push_insts(state);
     }
 }
 
-impl<'a> IntoImmediate<'a> for &ast::Expr<'a> {
-    fn into_immediate(self, state: &mut State<'a>) -> ir::Immediate<'a> {
+impl<'a> ast::Expr<'a> {
+    fn make_immediate(&self, state: &mut State<'a>) -> ir::Immediate<'a> {
         match self {
             ast::Expr::Int(int) => ir::Immediate::Int(*int),
             ast::Expr::Ident(string) => {
                 ir::Immediate::Ident(ir::Ident::User(ir::User(string, None)))
             }
             ast::Expr::BinOp(..) | ast::Expr::Call(..) => {
-                let value = self.into_value(state);
+                let value = self.make_value(state);
                 let ident = state.step_ident(ir::Anonymous::Value);
                 state.insts.push(ir::Inst::Let(ident.clone(), value));
                 ir::Immediate::Ident(ident)
             }
         }
     }
-}
 
-impl<'a> IntoValue<'a> for &ast::Expr<'a> {
-    fn into_value(self, state: &mut State<'a>) -> ir::Value<'a> {
+    fn make_value(&self, state: &mut State<'a>) -> ir::Value<'a> {
         match self {
             ast::Expr::Int(..) | ast::Expr::Ident(..) => {
-                ir::Value::Immediate(self.into_immediate(state))
+                ir::Value::Immediate(self.make_immediate(state))
             }
             ast::Expr::BinOp(op, exprs) => {
-                let left = exprs.0.into_immediate(state);
-                let right = exprs.1.into_immediate(state);
+                let left = exprs.0.make_immediate(state);
+                let right = exprs.1.make_immediate(state);
                 ir::Value::BinOp(op.clone(), left, right)
             }
             ast::Expr::Call(_call) => todo!(),
@@ -415,50 +400,50 @@ impl<'a> IntoValue<'a> for &ast::Expr<'a> {
     }
 }
 
-impl<'a> IntoInsts<'a> for &ast::Stmt<'a> {
-    fn into_insts(self, state: &mut State<'a>) {
+impl<'a> ast::Stmt<'a> {
+    fn push_insts(&self, state: &mut State<'a>) {
         match self {
             ast::Stmt::Void(call) => {
-                let ir::Immediate::Ident(func) = call.0.into_immediate(state) else {
+                let ir::Immediate::Ident(func) = call.0.make_immediate(state) else {
                     todo!()
                 };
                 let args = call
                     .1
                     .iter()
-                    .map(|expr| expr.into_immediate(state))
+                    .map(|expr| expr.make_immediate(state))
                     .collect();
                 state.insts.push(ir::Inst::Call(func, args));
             }
             ast::Stmt::Let(string, expr) => {
-                let value = expr.into_value(state);
+                let value = expr.make_value(state);
                 state.insts.push(ir::Inst::Let(
                     ir::Ident::User(ir::User(string, None)),
                     value,
                 ));
             }
             ast::Stmt::Set(target, value) => {
-                let ir::Immediate::Ident(target) = target.into_immediate(state) else {
+                let ir::Immediate::Ident(target) = target.make_immediate(state) else {
                     todo!()
                 };
-                let value = value.into_value(state);
+                let value = value.make_value(state);
                 state.insts.push(ir::Inst::Set(target, value));
             }
             ast::Stmt::If(expr, scope) => {
-                let value = expr.into_value(state);
+                let value = expr.make_value(state);
                 let r#true = state.step_label();
                 let r#false = state.step_label();
                 state
                     .insts
                     .push(ir::Inst::Branch(value, r#true.clone(), r#false.clone()));
                 state.insts.push(ir::Inst::Label(r#true));
-                scope.into_insts(state);
+                scope.push_insts(state);
                 state.insts.push(ir::Inst::Label(r#false));
             }
             ast::Stmt::Loop(scope) => {
                 let Scope { begin, end: _ } = state.push_stack();
                 state.insts.push(ir::Inst::Jump(begin.clone()));
                 state.insts.push(ir::Inst::Label(begin));
-                scope.into_insts(state);
+                scope.push_insts(state);
                 let Scope { begin, end } = state.pop_stack();
                 state.insts.push(ir::Inst::Jump(begin));
                 state.insts.push(ir::Inst::Label(end));
@@ -467,17 +452,17 @@ impl<'a> IntoInsts<'a> for &ast::Stmt<'a> {
                 .insts
                 .push(ir::Inst::Jump(state.stack.last().unwrap().end.clone())),
             ast::Stmt::Return(expr) => {
-                let immediate = expr.as_ref().map(|expr| expr.into_immediate(state));
+                let immediate = expr.as_ref().map(|expr| expr.make_immediate(state));
                 state.insts.push(ir::Inst::Return(immediate));
             }
         }
     }
 }
 
-impl<'a> IntoInsts<'a> for &ast::Scope<'a> {
-    fn into_insts(self, state: &mut State<'a>) {
+impl<'a> ast::Scope<'a> {
+    fn push_insts(&self, state: &mut State<'a>) {
         for stmt in &(self.0) {
-            stmt.into_insts(state);
+            stmt.push_insts(state);
         }
     }
 }

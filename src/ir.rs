@@ -2,8 +2,20 @@ use crate::op::Op;
 use crate::prelude::write_delim;
 use std::fmt;
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct Ident<'a>(pub &'a str, pub Option<usize>);
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub enum Anonymous {
+    Value,
+    Label,
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub struct User<'a>(pub &'a str, pub Option<usize>);
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub enum Ident<'a> {
+    User(User<'a>),
+    Anonymous(Anonymous, usize),
+}
 
 #[derive(Clone)]
 pub enum Immediate<'a> {
@@ -18,7 +30,7 @@ pub enum Value<'a> {
 }
 
 #[derive(Clone)]
-pub struct Label<'a>(pub Ident<'a>, pub Vec<Ident<'a>>);
+pub struct Label<'a>(pub Ident<'a>, pub Vec<User<'a>>);
 
 #[derive(Clone)]
 pub enum Inst<'a> {
@@ -31,11 +43,29 @@ pub enum Inst<'a> {
     Return(Option<Immediate<'a>>),
 }
 
-impl fmt::Display for Ident<'_> {
+impl fmt::Display for Anonymous {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Value => write!(f, "value"),
+            Self::Label => write!(f, "label"),
+        }
+    }
+}
+
+impl fmt::Display for User<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self.1 {
+            Some(k) => write!(f, "{}.{}", self.0, k),
             None => write!(f, "{}", self.0),
-            Some(k) => write!(f, "{}{}", self.0, k),
+        }
+    }
+}
+
+impl fmt::Display for Ident<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::User(user) => write!(f, "{user}"),
+            Self::Anonymous(anonymous, k) => write!(f, "__{anonymous}__{k}"),
         }
     }
 }

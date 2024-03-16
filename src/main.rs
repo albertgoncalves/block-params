@@ -53,7 +53,7 @@ fn main() {
 
     let globals = HashSet::from(["console.log"]);
 
-    let mut blocks = state.split_blocks();
+    let mut blocks = lower::Blocks::from(&state.insts[..]);
     blocks.walk(&globals);
     println!("{blocks}");
 }

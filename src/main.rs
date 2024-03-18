@@ -1,6 +1,6 @@
 mod ast;
+mod blocks;
 mod ir;
-mod lower;
 mod op;
 mod prelude;
 
@@ -47,12 +47,12 @@ fn main() {
     );
     println!("{named_func}\n");
 
-    let mut state = lower::State::new();
+    let mut state = blocks::State::new();
     named_func.push_insts(&mut state);
 
     let globals = HashSet::from(["console.log"]);
 
-    let mut blocks = lower::Blocks::from(&state.insts[..]);
+    let mut blocks = blocks::Blocks::from(&state.insts[..]);
     blocks.walk(&globals);
     println!("{blocks}");
 }

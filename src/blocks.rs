@@ -3,34 +3,28 @@ use crate::ir;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+pub struct State<'a> {
+    insts: Vec<ir::Inst<'a>>,
+    k: usize,
+    stack: Vec<Scope<'a>>,
+    globals: HashSet<&'a str>,
+}
+
 struct Scope<'a> {
     begin: ir::Label<'a>,
     end: ir::Label<'a>,
 }
 
-pub struct Block<'a> {
-    pub label: ir::Label<'a>,
-    pub insts: Vec<ir::Inst<'a>>,
-}
+#[derive(Clone)]
+struct Block<'a>(ir::Label<'a>, Vec<ir::Inst<'a>>);
 
 pub struct Blocks<'a>(Vec<Block<'a>>);
-
-pub struct State<'a> {
-    pub insts: Vec<ir::Inst<'a>>,
-    k: usize,
-    stack: Vec<Scope<'a>>,
-}
-
-type Globals<'a> = HashSet<&'a str>;
-type Strings<'a> = Vec<&'a str>;
-type Locals<'a> = HashMap<&'a str, usize>;
-type Labels<'a> = HashMap<ir::Ident<'a>, Vec<ir::User<'a>>>;
 
 impl fmt::Display for Blocks<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for block in &self.0 {
-            writeln!(f, "    {}:", block.label)?;
-            for inst in &block.insts {
+            writeln!(f, "    {}:", block.0)?;
+            for inst in &block.1 {
                 writeln!(f, "    {inst}")?;
             }
             writeln!(f)?;
@@ -39,290 +33,21 @@ impl fmt::Display for Blocks<'_> {
     }
 }
 
-impl<'a> ir::User<'a> {
-    fn visited(&self, globals: &Globals<'a>, strings: &mut Strings<'a>) {
-        assert!(self.1.is_none());
-        if globals.contains(self.0) {
-            return;
-        }
-        strings.push(self.0);
-    }
-
-    fn promote(&mut self, globals: &Globals<'a>, locals: &mut Locals<'a>) {
-        assert!(self.1.is_none());
-        if globals.contains(self.0) {
-            return;
-        }
-        let k = locals.get(self.0).map_or(0, |k| k + 1);
-        self.1 = Some(k);
-        locals.insert(self.0, k);
-    }
-
-    fn catch_up(&mut self, globals: &Globals<'a>, locals: &Locals<'a>) {
-        assert!(self.1.is_none());
-        if globals.contains(self.0) {
-            return;
-        }
-        let k = locals[self.0];
-        self.1 = Some(k);
-    }
+const fn make_immediate_expr_int<'a>(int: i64) -> ir::Immediate<'a> {
+    ir::Immediate::Int(int)
 }
 
-impl<'a> ir::Ident<'a> {
-    fn visited(&self, globals: &Globals<'a>, strings: &mut Strings<'a>) {
-        match self {
-            Self::User(user @ ir::User(_, None)) => user.visited(globals, strings),
-            Self::User(..) | Self::Anonymous(..) => unreachable!(),
-        }
-    }
-
-    fn promote(&mut self, globals: &Globals<'a>, locals: &mut Locals<'a>) {
-        match self {
-            Self::User(user @ ir::User(_, None)) => user.promote(globals, locals),
-            Self::User(..) | Self::Anonymous(..) => unreachable!(),
-        }
-    }
-
-    fn catch_up(&mut self, globals: &Globals<'a>, locals: &Locals<'a>) {
-        match self {
-            Self::User(user @ ir::User(_, None)) => user.catch_up(globals, locals),
-            Self::User(..) | Self::Anonymous(..) => unreachable!(),
-        }
-    }
-}
-
-impl<'a> ir::Immediate<'a> {
-    fn visited(&self, globals: &Globals<'a>, strings: &mut Strings<'a>) {
-        if let Self::Ident(ident) = self {
-            ident.visited(globals, strings);
-        }
-    }
-
-    fn catch_up(&mut self, globals: &Globals<'a>, locals: &Locals<'a>) {
-        if let Self::Ident(ident) = self {
-            ident.catch_up(globals, locals);
-        }
-    }
-}
-
-impl<'a> ir::Value<'a> {
-    fn visited(&self, globals: &Globals<'a>, strings: &mut Strings<'a>) {
-        match self {
-            Self::Immediate(immediate) => immediate.visited(globals, strings),
-            Self::BinOp(_, left, right) => {
-                left.visited(globals, strings);
-                right.visited(globals, strings);
-            }
-        }
-    }
-
-    fn catch_up(&mut self, globals: &Globals<'a>, locals: &Locals<'a>) {
-        match self {
-            Self::Immediate(immediate) => immediate.catch_up(globals, locals),
-            Self::BinOp(_, left, right) => {
-                left.catch_up(globals, locals);
-                right.catch_up(globals, locals);
-            }
-        }
-    }
-}
-
-impl<'a> ir::Label<'a> {
-    fn visited(&self, globals: &Globals<'a>, strings: &mut Strings<'a>) {
-        for user in &self.1 {
-            user.visited(globals, strings);
-        }
-    }
-
-    fn inject(&mut self, labels: &Labels<'a>) -> bool {
-        match labels.get(&self.0) {
-            Some(idents) => {
-                let mut result = false;
-                for ident in idents {
-                    if !self.1.contains(ident) {
-                        self.1.push(ident.clone());
-                        result |= true;
-                    }
-                }
-                result
-            }
-            None => false,
-        }
-    }
-
-    fn catch_up(&mut self, globals: &Globals<'a>, locals: &Locals<'a>) {
-        for user in &mut self.1 {
-            user.catch_up(globals, locals);
-        }
-    }
-}
-
-impl<'a> ir::Inst<'a> {
-    const fn is_label(&self) -> bool {
-        matches!(self, Self::Label(..))
-    }
-
-    const fn is_jump(&self) -> bool {
-        matches!(self, Self::Jump(..) | Self::Branch(..) | Self::Return(..))
-    }
-
-    fn visited(&self, globals: &Globals<'a>, strings: &mut Strings<'a>) {
-        match self {
-            Self::Label(..) => unreachable!(),
-            Self::Let(_, value) | Self::Set(_, value) => value.visited(globals, strings),
-            Self::Jump(label) => label.visited(globals, strings),
-            Self::Branch(value, r#true, r#false) => {
-                value.visited(globals, strings);
-                r#true.visited(globals, strings);
-                r#false.visited(globals, strings);
-            }
-            Self::Call(func, args) => {
-                func.visited(globals, strings);
-                for arg in args {
-                    arg.visited(globals, strings);
-                }
-            }
-            Self::Return(Some(immediate)) => immediate.visited(globals, strings),
-            Self::Return(None) => (),
-        }
-    }
-
-    const fn declared(&self) -> Option<&'a str> {
-        match self {
-            Self::Let(ir::Ident::User(ir::User(string, _)), _) => Some(*string),
-            _ => None,
-        }
-    }
-
-    fn inject(&mut self, labels: &Labels<'a>) -> bool {
-        match self {
-            Self::Label(..) => unreachable!(),
-            Self::Jump(label) => label.inject(labels),
-            Self::Branch(_, r#true, r#false) => r#true.inject(labels) | r#false.inject(labels),
-            Self::Let(..) | Self::Set(..) | Self::Call(..) | Self::Return(..) => false,
-        }
-    }
-
-    fn promote_and_catch_up(&mut self, globals: &Globals<'a>, locals: &mut Locals<'a>) {
-        match self {
-            Self::Label(..) => unreachable!(),
-            Self::Let(ident, value) | Self::Set(ident, value) => {
-                value.catch_up(globals, locals);
-                ident.promote(globals, locals);
-                *self = Self::Let(ident.clone(), value.clone());
-            }
-            Self::Jump(label) => label.catch_up(globals, locals),
-            Self::Branch(value, r#true, r#false) => {
-                value.catch_up(globals, locals);
-                r#true.catch_up(globals, locals);
-                r#false.catch_up(globals, locals);
-            }
-            Self::Call(func, args) => {
-                func.catch_up(globals, locals);
-                for arg in args {
-                    arg.catch_up(globals, locals);
-                }
-            }
-            Self::Return(Some(immediate)) => immediate.catch_up(globals, locals),
-            Self::Return(None) => (),
-        }
-    }
-}
-
-impl<'a> From<&[ir::Inst<'a>]> for Block<'a> {
-    fn from(insts: &[ir::Inst<'a>]) -> Self {
-        let ir::Inst::Label(ref label) = insts[0] else {
-            unreachable!();
-        };
-
-        let n = insts.len() - 1;
-        assert!(insts[n].is_jump());
-        for inst in &insts[1..n] {
-            assert!(!inst.is_jump());
-        }
-
-        Self {
-            label: label.clone(),
-            insts: insts[1..].to_vec(),
-        }
-    }
-}
-
-impl<'a> Block<'a> {
-    fn walk(&mut self, globals: &Globals<'a>) {
-        let mut locals = HashSet::new();
-        let mut strings: Strings<'a> = vec![];
-
-        for inst in &self.insts {
-            inst.visited(globals, &mut strings);
-            for string in &strings {
-                if locals.contains(string) || self.label.1.contains(&ir::User(string, None)) {
-                    continue;
-                }
-                self.label.1.push(ir::User(string, None));
-            }
-            if let Some(string) = inst.declared() {
-                locals.insert(string);
-            }
-        }
-    }
-}
-
-impl<'a> From<&[ir::Inst<'a>]> for Blocks<'a> {
-    fn from(insts: &[ir::Inst<'a>]) -> Self {
-        let mut blocks = vec![];
-        let mut i = 0;
-
-        for (j, inst) in insts.iter().enumerate() {
-            if inst.is_label() {
-                if i != j {
-                    blocks.push(&insts[i..j]);
-                }
-                i = j;
-            }
-        }
-        assert!(i != insts.len());
-        blocks.push(&insts[i..insts.len()]);
-
-        Self(blocks.into_iter().map(Block::from).collect())
-    }
-}
-
-impl<'a> Blocks<'a> {
-    pub fn walk(&mut self, globals: &Globals<'a>) {
-        let mut labels: Labels<'a> = HashMap::new();
-        let mut repeat = true;
-        while repeat {
-            for block in &mut self.0 {
-                block.walk(globals);
-                labels.insert(block.label.0.clone(), block.label.1.clone());
-            }
-            repeat = false;
-            for block in &mut self.0 {
-                for inst in &mut block.insts {
-                    repeat |= inst.inject(&labels);
-                }
-            }
-        }
-
-        let mut locals: Locals<'a> = HashMap::new();
-        for block in &mut self.0 {
-            for user in &mut block.label.1 {
-                user.promote(globals, &mut locals);
-            }
-            for inst in &mut block.insts {
-                inst.promote_and_catch_up(globals, &mut locals);
-            }
-        }
-    }
+const fn make_ident_expr_ident(ident: &str) -> ir::Ident<'_> {
+    ir::Ident::Named(ir::Named(ident, None))
 }
 
 impl<'a> State<'a> {
-    pub const fn new() -> Self {
+    pub fn new(globals: HashSet<&'a str>) -> Self {
         Self {
             k: 0,
             insts: vec![],
             stack: vec![],
+            globals,
         }
     }
 
@@ -332,12 +57,16 @@ impl<'a> State<'a> {
         k
     }
 
-    fn step_ident(&mut self, anonymous: ir::Anonymous) -> ir::Ident<'a> {
-        ir::Ident::Anonymous(anonymous, self.step_k())
+    fn step_ident_value(&mut self) -> ir::Ident<'a> {
+        ir::Ident::Anonymous(ir::Anonymous::Value(self.step_k()))
+    }
+
+    fn step_ident_label(&mut self) -> ir::Ident<'a> {
+        ir::Ident::Anonymous(ir::Anonymous::Label(self.step_k()))
     }
 
     fn step_label(&mut self) -> ir::Label<'a> {
-        ir::Label(self.step_ident(ir::Anonymous::Label), vec![])
+        ir::Label(self.step_ident_label(), vec![])
     }
 
     fn push_stack(&mut self) -> Scope<'a> {
@@ -353,116 +82,430 @@ impl<'a> State<'a> {
     fn pop_stack(&mut self) -> Scope<'a> {
         self.stack.pop().unwrap()
     }
-}
 
-impl<'a> ast::NamedFunc<'a> {
-    pub fn push_insts(&self, state: &mut State<'a>) {
-        let args = (self.1 .0)
-            .iter()
-            .map(|string| ir::User(string, None))
-            .collect();
-        state.insts.push(ir::Inst::Label(ir::Label(
-            ir::Ident::User(ir::User(self.0, None)),
-            args,
-        )));
-        self.1 .1.push_insts(state);
+    fn make_ident_expr_call(&mut self, expr: &ast::Expr<'a>) -> ir::Ident<'a> {
+        let value = self.make_value_expr(expr);
+        let ident = self.step_ident_value();
+        self.insts.push(ir::Inst::Let(ident.clone(), value));
+        ident
     }
-}
 
-impl<'a> ast::Expr<'a> {
-    fn make_immediate(&self, state: &mut State<'a>) -> ir::Immediate<'a> {
-        match self {
-            ast::Expr::Int(int) => ir::Immediate::Int(*int),
-            ast::Expr::Ident(string) => {
-                ir::Immediate::Ident(ir::Ident::User(ir::User(string, None)))
-            }
+    fn make_ident_expr(&mut self, expr: &ast::Expr<'a>) -> ir::Ident<'a> {
+        match expr {
+            ast::Expr::Int(..) => unreachable!(),
+            ast::Expr::Ident(ident) => make_ident_expr_ident(ident),
+            ast::Expr::BinOp(..) | ast::Expr::Call(..) => self.make_ident_expr_call(expr),
+        }
+    }
+
+    fn make_immediate_expr(&mut self, expr: &ast::Expr<'a>) -> ir::Immediate<'a> {
+        match expr {
+            ast::Expr::Int(int) => make_immediate_expr_int(*int),
+            ast::Expr::Ident(ident) => ir::Immediate::Ident(make_ident_expr_ident(ident)),
             ast::Expr::BinOp(..) | ast::Expr::Call(..) => {
-                let value = self.make_value(state);
-                let ident = state.step_ident(ir::Anonymous::Value);
-                state.insts.push(ir::Inst::Let(ident.clone(), value));
-                ir::Immediate::Ident(ident)
+                ir::Immediate::Ident(self.make_ident_expr_call(expr))
             }
         }
     }
 
-    fn make_value(&self, state: &mut State<'a>) -> ir::Value<'a> {
-        match self {
-            ast::Expr::Int(..) | ast::Expr::Ident(..) => {
-                ir::Value::Immediate(self.make_immediate(state))
+    fn make_value_expr(&mut self, expr: &ast::Expr<'a>) -> ir::Value<'a> {
+        match expr {
+            ast::Expr::Int(int) => ir::Value::Immediate(make_immediate_expr_int(*int)),
+            ast::Expr::Ident(ident) => {
+                ir::Value::Immediate(ir::Immediate::Ident(make_ident_expr_ident(ident)))
             }
             ast::Expr::BinOp(op, exprs) => {
-                let left = exprs.0.make_immediate(state);
-                let right = exprs.1.make_immediate(state);
+                let left = self.make_immediate_expr(&exprs.0);
+                let right = self.make_immediate_expr(&exprs.1);
                 ir::Value::BinOp(op.clone(), left, right)
             }
             ast::Expr::Call(_call) => todo!(),
         }
     }
-}
 
-impl<'a> ast::Stmt<'a> {
-    fn push_insts(&self, state: &mut State<'a>) {
-        match self {
+    fn push_insts_stmt(&mut self, stmt: &ast::Stmt<'a>) {
+        match stmt {
             ast::Stmt::Void(call) => {
-                let ir::Immediate::Ident(func) = call.0.make_immediate(state) else {
-                    todo!()
-                };
+                let func = self.make_ident_expr(&call.0);
                 let args = call
                     .1
                     .iter()
-                    .map(|expr| expr.make_immediate(state))
+                    .map(|expr| self.make_immediate_expr(expr))
                     .collect();
-                state.insts.push(ir::Inst::Call(func, args));
+                self.insts.push(ir::Inst::Void(ir::Value::Call(func, args)));
             }
-            ast::Stmt::Let(string, expr) => {
-                let value = expr.make_value(state);
-                state.insts.push(ir::Inst::Let(
-                    ir::Ident::User(ir::User(string, None)),
+            ast::Stmt::Let(ident, expr) => {
+                let value = self.make_value_expr(expr);
+                self.insts.push(ir::Inst::Let(
+                    ir::Ident::Named(ir::Named(ident, None)),
                     value,
                 ));
             }
             ast::Stmt::Set(target, value) => {
-                let ir::Immediate::Ident(target) = target.make_immediate(state) else {
-                    todo!()
-                };
-                let value = value.make_value(state);
-                state.insts.push(ir::Inst::Set(target, value));
+                let target = self.make_ident_expr(target);
+                let value = self.make_value_expr(value);
+                self.insts.push(ir::Inst::Set(target, value));
             }
             ast::Stmt::If(expr, scope) => {
-                let value = expr.make_value(state);
-                let r#true = state.step_label();
-                let r#false = state.step_label();
-                state
-                    .insts
+                let value = self.make_value_expr(expr);
+                let r#true = self.step_label();
+                let r#false = self.step_label();
+                self.insts
                     .push(ir::Inst::Branch(value, r#true.clone(), r#false.clone()));
-                state.insts.push(ir::Inst::Label(r#true));
-                scope.push_insts(state);
-                state.insts.push(ir::Inst::Label(r#false));
+                self.insts.push(ir::Inst::Label(r#true));
+                self.push_insts_scope(scope);
+                self.insts.push(ir::Inst::Label(r#false));
             }
             ast::Stmt::Loop(scope) => {
-                let Scope { begin, end: _ } = state.push_stack();
-                state.insts.push(ir::Inst::Jump(begin.clone()));
-                state.insts.push(ir::Inst::Label(begin));
-                scope.push_insts(state);
-                let Scope { begin, end } = state.pop_stack();
-                state.insts.push(ir::Inst::Jump(begin));
-                state.insts.push(ir::Inst::Label(end));
+                let Scope { begin, end: _ } = self.push_stack();
+                self.insts.push(ir::Inst::Jump(begin.clone()));
+                self.insts.push(ir::Inst::Label(begin));
+                self.push_insts_scope(scope);
+                let Scope { begin, end } = self.pop_stack();
+                self.insts.push(ir::Inst::Jump(begin));
+                self.insts.push(ir::Inst::Label(end));
             }
-            ast::Stmt::Break => state
+            ast::Stmt::Break => self
                 .insts
-                .push(ir::Inst::Jump(state.stack.last().unwrap().end.clone())),
+                .push(ir::Inst::Jump(self.stack.last().unwrap().end.clone())),
             ast::Stmt::Return(expr) => {
-                let immediate = expr.as_ref().map(|expr| expr.make_immediate(state));
-                state.insts.push(ir::Inst::Return(immediate));
+                let immediate = expr.as_ref().map(|expr| self.make_immediate_expr(expr));
+                self.insts.push(ir::Inst::Return(immediate));
+            }
+        }
+    }
+
+    fn push_insts_scope(&mut self, scope: &ast::Scope<'a>) {
+        for stmt in &scope.0 {
+            self.push_insts_stmt(stmt);
+        }
+    }
+
+    pub fn push_insts_named_func(&mut self, named_func: &ast::NamedFunc<'a>) {
+        let args = (named_func.1 .0)
+            .iter()
+            .map(|named| ir::Named(named, None))
+            .collect();
+        self.insts.push(ir::Inst::Label(ir::Label(
+            ir::Ident::Named(ir::Named(named_func.0, None)),
+            args,
+        )));
+        self.push_insts_scope(&named_func.1 .1);
+    }
+
+    fn push_named_blocks(&self, blocks: &mut Blocks<'a>) {
+        let mut labels = HashMap::new();
+        let mut repeat = true;
+
+        while repeat {
+            for block in &mut blocks.0 {
+                let mut locals: HashSet<&ir::Named<'a>> = HashSet::new();
+                for inst in &mut block.1 {
+                    let mut reads = ir::MutReads::new();
+                    reads.push_mut_reads_inst(inst);
+                    for named in reads.named {
+                        assert!(named.1.is_none());
+                        if locals.contains(named) {
+                            continue;
+                        }
+                        if block.0 .1.contains(named) || self.globals.contains(named.0) {
+                            continue;
+                        }
+                        block.0 .1.push(named.clone());
+                    }
+                    if let ir::Inst::Let(ir::Ident::Named(named), _) = inst {
+                        locals.insert(named);
+                    }
+                }
+                labels.insert(block.0 .0.clone(), block.0 .1.clone());
+            }
+
+            repeat = false;
+            for block in &mut blocks.0 {
+                for inst in &mut block.1 {
+                    match inst {
+                        ir::Inst::Jump(label) => {
+                            push_named_label(label, &labels, &mut repeat);
+                        }
+                        ir::Inst::Branch(_, r#true, r#false) => {
+                            push_named_label(r#true, &labels, &mut repeat);
+                            push_named_label(r#false, &labels, &mut repeat);
+                        }
+                        _ => (),
+                    }
+                }
+            }
+        }
+    }
+
+    fn number_idents(&self, blocks: &mut Blocks<'a>) {
+        let mut numbers = HashMap::new();
+        for block in &mut blocks.0 {
+            for named in &mut block.0 .1 {
+                assert!(!self.globals.contains(named.0));
+                let k = numbers.get(named.0).map_or(0, |k| *k + 1);
+                numbers.insert(named.0, k);
+                named.1 = Some(k);
+            }
+            for inst in &mut block.1 {
+                if let ir::Inst::Set(ident, value) = inst {
+                    *inst = ir::Inst::Let(ident.clone(), value.clone());
+                }
+
+                let mut reads = ir::MutReads::new();
+                reads.push_mut_reads_inst(inst);
+                for named in reads.named {
+                    if self.globals.contains(named.0) {
+                        continue;
+                    }
+                    named.1 = Some(numbers[named.0]);
+                }
+                for anonymous in reads.anonymous {
+                    if let ir::Anonymous::Value(..) = anonymous {
+                        todo!()
+                    }
+                }
+                if let ir::Inst::Let(ir::Ident::Named(named), _) = inst {
+                    let k = numbers.get(named.0).map_or(0, |k| *k + 1);
+                    numbers.insert(named.0, k);
+                    named.1 = Some(k);
+                }
+            }
+        }
+    }
+
+    fn check_blocks(&self, blocks: &Blocks<'a>) {
+        for block in &blocks.0 {
+            let mut locals = HashSet::new();
+            for named in &block.0 .1 {
+                assert!(locals.insert(ir::Ident::Named(named.clone())));
+            }
+            for inst in &block.1 {
+                let mut idents = ir::Idents::new();
+                idents.push_idents_inst(inst);
+                for ident in idents.0 {
+                    match ident {
+                        ir::Ident::Named(ir::Named(named, None))
+                            if self.globals.contains(named) =>
+                        {
+                            continue;
+                        }
+                        ir::Ident::Anonymous(ir::Anonymous::Label(_)) => continue,
+                        _ => (),
+                    }
+                    assert!(locals.contains(&ident));
+                }
+                if let ir::Inst::Let(ident, _) = inst {
+                    locals.insert(ident.clone());
+                }
             }
         }
     }
 }
 
-impl<'a> ast::Scope<'a> {
-    fn push_insts(&self, state: &mut State<'a>) {
-        for stmt in &(self.0) {
-            stmt.push_insts(state);
+fn push_named_label<'a>(
+    label: &mut ir::Label<'a>,
+    labels: &HashMap<ir::Ident<'a>, Vec<ir::Named<'a>>>,
+    repeat: &mut bool,
+) {
+    for named in &labels[&label.0] {
+        if label.1.contains(named) {
+            continue;
+        }
+        label.1.push(named.clone());
+        *repeat = true;
+    }
+}
+
+const fn is_jump(inst: &ir::Inst<'_>) -> bool {
+    matches!(
+        inst,
+        ir::Inst::Jump(..) | ir::Inst::Branch(..) | ir::Inst::Return(..),
+    )
+}
+
+impl<'a> From<&[ir::Inst<'a>]> for Block<'a> {
+    fn from(insts: &[ir::Inst<'a>]) -> Self {
+        let ir::Inst::Label(ref label) = insts[0] else {
+            unreachable!();
+        };
+
+        let n = insts.len() - 1;
+        assert!(is_jump(&insts[n]));
+        for inst in &insts[1..n] {
+            assert!(!is_jump(inst));
+        }
+
+        Self(label.clone(), insts[1..].to_vec())
+    }
+}
+
+impl<'a> From<&[ir::Inst<'a>]> for Blocks<'a> {
+    fn from(insts: &[ir::Inst<'a>]) -> Self {
+        let mut blocks = vec![];
+        let mut i = 0;
+
+        for (j, inst) in insts.iter().enumerate() {
+            if matches!(inst, ir::Inst::Label(..)) {
+                if i != j {
+                    blocks.push(&insts[i..j]);
+                }
+                i = j;
+            }
+        }
+        assert!(i != insts.len());
+        blocks.push(&insts[i..insts.len()]);
+
+        Self(blocks.into_iter().map(Block::from).collect())
+    }
+}
+
+fn optimize(blocks: &mut Blocks<'_>) {
+    loop {
+        let mut count = 0;
+        count += coalesce_jumps(blocks);
+        count += remove_unused_idents_blocks(blocks);
+        if count == 0 {
+            break;
         }
     }
+}
+
+impl<'a> From<&mut State<'a>> for Blocks<'a> {
+    fn from(state: &mut State<'a>) -> Self {
+        let mut blocks = Blocks::from(&state.insts[..]);
+        state.push_named_blocks(&mut blocks);
+        state.number_idents(&mut blocks);
+        optimize(&mut blocks);
+        state.check_blocks(&blocks);
+        blocks
+    }
+}
+
+fn coalesce_jumps(blocks: &mut Blocks<'_>) -> usize {
+    let mut idents = HashMap::new();
+    for block in &blocks.0 {
+        let n = block.1.len();
+        assert!(0 < n);
+        if block.1.len() != 1 {
+            continue;
+        }
+        if let ir::Inst::Jump(label) = &block.1[0] {
+            idents.insert(block.0 .0.clone(), label.0.clone());
+        }
+    }
+    if idents.is_empty() {
+        return 0;
+    }
+
+    let mut indices = vec![];
+    for (i, block) in blocks.0.iter_mut().enumerate() {
+        if idents.contains_key(&block.0 .0) {
+            indices.push(i);
+            continue;
+        }
+        for inst in &mut block.1 {
+            match inst {
+                ir::Inst::Jump(label) => {
+                    if let Some(ident) = idents.get(&label.0) {
+                        label.0 = ident.clone();
+                    }
+                }
+                ir::Inst::Branch(_, r#true, r#false) => {
+                    if let Some(ident) = idents.get(&r#true.0) {
+                        r#true.0 = ident.clone();
+                    }
+                    if let Some(ident) = idents.get(&r#false.0) {
+                        r#false.0 = ident.clone();
+                    }
+                }
+                _ => (),
+            }
+        }
+    }
+    remove_indices(&mut blocks.0, &indices[..])
+}
+
+fn remove_unused_idents_blocks(blocks: &mut Blocks<'_>) -> usize {
+    let mut reads_named: HashSet<ir::Named> = HashSet::new();
+    for block in &mut blocks.0 {
+        for inst in &mut block.1 {
+            let mut reads = ir::MutReads::new();
+            reads.push_mut_reads_inst(inst);
+            for named in reads.named {
+                reads_named.insert(named.clone());
+            }
+        }
+    }
+
+    let mut count = 0;
+
+    let mut labels = HashMap::new();
+    for block in &mut blocks.0 {
+        {
+            let mut indices = vec![];
+            for (i, named) in block.0 .1.iter().enumerate() {
+                if !reads_named.contains(named) {
+                    indices.push(i);
+                }
+            }
+            count += remove_indices(&mut block.0 .1, &indices[..]);
+        }
+        {
+            let mut indices = vec![];
+            for (i, inst) in block.1.iter().enumerate() {
+                if let ir::Inst::Let(ir::Ident::Named(named), _) = inst {
+                    if !reads_named.contains(named) {
+                        indices.push(i);
+                    }
+                }
+            }
+            count += remove_indices(&mut block.1, &indices[..]);
+        }
+        labels.insert(block.0 .0.clone(), block.0 .1.clone());
+    }
+
+    for block in &mut blocks.0 {
+        for inst in &mut block.1 {
+            match inst {
+                ir::Inst::Jump(label) => count += remove_unused_idents_label(label, &labels),
+                ir::Inst::Branch(_, r#true, r#false) => {
+                    count += remove_unused_idents_label(r#true, &labels);
+                    count += remove_unused_idents_label(r#false, &labels);
+                }
+                _ => (),
+            }
+        }
+    }
+
+    count
+}
+
+fn remove_unused_idents_label<'a>(
+    label: &mut ir::Label<'a>,
+    labels: &HashMap<ir::Ident<'a>, Vec<ir::Named<'a>>>,
+) -> usize {
+    let mut indices = vec![];
+    for (i, named0) in label.1.iter().enumerate() {
+        let mut found = false;
+        for named1 in &labels[&label.0] {
+            if named0.0 == named1.0 {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            indices.push(i);
+        }
+    }
+    remove_indices(&mut label.1, &indices[..])
+}
+
+fn remove_indices<T>(vec: &mut Vec<T>, indices: &[usize]) -> usize {
+    let count = indices.len();
+    for i in indices.iter().rev() {
+        // NOTE: This could get very slow on large inputs.
+        vec.remove(*i);
+    }
+    count
 }

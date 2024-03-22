@@ -47,12 +47,9 @@ fn main() {
     );
     println!("{named_func}\n");
 
-    let mut state = blocks::State::new();
-    named_func.push_insts(&mut state);
+    let mut state = blocks::State::new(HashSet::from(["console.log"]));
+    state.push_insts_named_func(&named_func);
 
-    let globals = HashSet::from(["console.log"]);
-
-    let mut blocks = blocks::Blocks::from(&state.insts[..]);
-    blocks.walk(&globals);
-    println!("{blocks}");
+    let blocks = blocks::Blocks::from(&mut state);
+    print!("{blocks}");
 }

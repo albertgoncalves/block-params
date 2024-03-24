@@ -13,7 +13,14 @@ fn main() {
             vec![],
             ast::Scope(vec![
                 ast::Stmt::Let("x", ast::Expr::Int(0)),
-                ast::Stmt::Let("y", ast::Expr::Int(0)),
+                ast::Stmt::Let("z", ast::Expr::Int(-1)),
+                ast::Stmt::Let(
+                    "y",
+                    ast::Expr::BinOp(
+                        op::Op::Add,
+                        Box::new((ast::Expr::Ident("z"), ast::Expr::Int(1))),
+                    ),
+                ),
                 ast::Stmt::Loop(ast::Scope(vec![
                     ast::Stmt::If(
                         ast::Expr::BinOp(

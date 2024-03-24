@@ -3,7 +3,7 @@ use crate::prelude::write_delim;
 use std::fmt;
 
 #[derive(Clone, Eq, Hash, PartialEq)]
-pub struct Named<'a>(pub &'a str, pub Option<usize>);
+pub struct Name<'a>(pub &'a str, pub Option<usize>);
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub enum Anonymous {
@@ -13,7 +13,7 @@ pub enum Anonymous {
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub enum Ident<'a> {
-    Named(Named<'a>),
+    Name(Name<'a>),
     Anonymous(Anonymous),
 }
 
@@ -31,7 +31,7 @@ pub enum Value<'a> {
 }
 
 #[derive(Clone)]
-pub struct Label<'a>(pub Ident<'a>, pub Vec<Named<'a>>);
+pub struct Label<'a>(pub Ident<'a>, pub Vec<Name<'a>>);
 
 #[derive(Clone)]
 pub enum Inst<'a> {
@@ -44,18 +44,11 @@ pub enum Inst<'a> {
     Return(Option<Immediate<'a>>),
 }
 
-pub struct MutReads<'a, 'b> {
-    pub named: Vec<&'b mut Named<'a>>,
-    pub anonymous: Vec<&'b mut Anonymous>,
-}
-
-pub struct Idents<'a>(pub Vec<Ident<'a>>);
-
-impl fmt::Display for Named<'_> {
+impl fmt::Display for Name<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self(named, Some(k)) => write!(f, "{named}.{k}"),
-            Self(named, None) => write!(f, "{named}"),
+            Self(name, Some(k)) => write!(f, "{name}.{k}"),
+            Self(name, None) => write!(f, "{name}"),
         }
     }
 }
@@ -72,7 +65,7 @@ impl fmt::Display for Anonymous {
 impl fmt::Display for Ident<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Self::Named(named) => write!(f, "{named}"),
+            Self::Name(name) => write!(f, "{name}"),
             Self::Anonymous(anonymous) => write!(f, "{anonymous}"),
         }
     }
@@ -126,128 +119,210 @@ impl fmt::Display for Inst<'_> {
     }
 }
 
-impl<'a, 'b> MutReads<'a, 'b> {
-    pub fn new() -> Self {
-        Self {
-            named: vec![],
-            anonymous: vec![],
+fn push_mut_names_ident<'a, 'b>(vec: &mut Vec<&'b mut Name<'a>>, ident: &'b mut Ident<'a>) {
+    if let Ident::Name(name) = ident {
+        vec.push(name);
+    }
+}
+
+fn push_mut_names_immediate<'a, 'b>(
+    vec: &mut Vec<&'b mut Name<'a>>,
+    immediate: &'b mut Immediate<'a>,
+) {
+    match immediate {
+        Immediate::Int(..) => (),
+        Immediate::Ident(ident) => push_mut_names_ident(vec, ident),
+    }
+}
+
+fn push_mut_names_value<'a, 'b>(vec: &mut Vec<&'b mut Name<'a>>, value: &'b mut Value<'a>) {
+    match value {
+        Value::Immediate(immediate) => push_mut_names_immediate(vec, immediate),
+        Value::BinOp(_, left, right) => {
+            push_mut_names_immediate(vec, left);
+            push_mut_names_immediate(vec, right);
         }
-    }
-
-    fn push_mut_reads_ident(&mut self, ident: &'b mut Ident<'a>) {
-        match ident {
-            Ident::Named(named) => self.named.push(named),
-            Ident::Anonymous(anonymous) => self.anonymous.push(anonymous),
-        };
-    }
-
-    fn push_mut_reads_immediate(&mut self, immediate: &'b mut Immediate<'a>) {
-        match immediate {
-            Immediate::Int(..) => (),
-            Immediate::Ident(ident) => self.push_mut_reads_ident(ident),
-        }
-    }
-
-    fn push_mut_reads_value(&mut self, value: &'b mut Value<'a>) {
-        match value {
-            Value::Immediate(immediate) => self.push_mut_reads_immediate(immediate),
-            Value::BinOp(_, left, right) => {
-                self.push_mut_reads_immediate(left);
-                self.push_mut_reads_immediate(right);
+        Value::Call(func, args) => {
+            push_mut_names_ident(vec, func);
+            for arg in args {
+                push_mut_names_immediate(vec, arg);
             }
-            Value::Call(func, args) => {
-                self.push_mut_reads_ident(func);
-                for arg in args {
-                    self.push_mut_reads_immediate(arg);
-                }
-            }
-        }
-    }
-
-    fn push_mut_reads_label(&mut self, label: &'b mut Label<'a>) {
-        self.push_mut_reads_ident(&mut label.0);
-        for named in &mut label.1 {
-            self.named.push(named);
-        }
-    }
-
-    pub fn push_mut_reads_inst(&mut self, inst: &'b mut Inst<'a>) {
-        match inst {
-            Inst::Label(..) => unreachable!(),
-            Inst::Let(_, value) => {
-                self.push_mut_reads_value(value);
-            }
-            Inst::Set(ident, value) => {
-                self.push_mut_reads_value(value);
-                self.push_mut_reads_ident(ident);
-            }
-            Inst::Void(value) => self.push_mut_reads_value(value),
-            Inst::Jump(label) => self.push_mut_reads_label(label),
-            Inst::Branch(value, r#true, r#false) => {
-                self.push_mut_reads_value(value);
-                self.push_mut_reads_label(r#true);
-                self.push_mut_reads_label(r#false);
-            }
-            Inst::Return(Some(immediate)) => self.push_mut_reads_immediate(immediate),
-            Inst::Return(None) => (),
         }
     }
 }
 
-impl<'a> Idents<'a> {
-    pub const fn new() -> Self {
-        Self(vec![])
+fn push_mut_names_label<'a, 'b>(vec: &mut Vec<&'b mut Name<'a>>, label: &'b mut Label<'a>) {
+    push_mut_names_ident(vec, &mut label.0);
+    for name in &mut label.1 {
+        vec.push(name);
     }
+}
 
-    fn push_idents_ident(&mut self, ident: &Ident<'a>) {
-        self.0.push(ident.clone());
+pub fn push_mut_names_inst<'a, 'b>(vec: &mut Vec<&'b mut Name<'a>>, inst: &'b mut Inst<'a>) {
+    match inst {
+        Inst::Label(..) => unreachable!(),
+        Inst::Let(_, value) => {
+            push_mut_names_value(vec, value);
+        }
+        Inst::Set(ident, value) => {
+            push_mut_names_value(vec, value);
+            push_mut_names_ident(vec, ident);
+        }
+        Inst::Void(value) => push_mut_names_value(vec, value),
+        Inst::Jump(label) => push_mut_names_label(vec, label),
+        Inst::Branch(value, r#true, r#false) => {
+            push_mut_names_value(vec, value);
+            push_mut_names_label(vec, r#true);
+            push_mut_names_label(vec, r#false);
+        }
+        Inst::Return(Some(immediate)) => push_mut_names_immediate(vec, immediate),
+        Inst::Return(None) => (),
     }
+}
 
-    fn push_idents_immediate(&mut self, immediate: &Immediate<'a>) {
-        match immediate {
-            Immediate::Int(..) => (),
-            Immediate::Ident(ident) => self.push_idents_ident(ident),
+fn push_names_ident<'a>(vec: &mut Vec<Name<'a>>, ident: &Ident<'a>) {
+    if let Ident::Name(name) = ident {
+        vec.push(name.clone());
+    }
+}
+
+fn push_names_immediate<'a>(vec: &mut Vec<Name<'a>>, immediate: &Immediate<'a>) {
+    match immediate {
+        Immediate::Int(..) => (),
+        Immediate::Ident(ident) => push_names_ident(vec, ident),
+    }
+}
+
+fn push_names_value<'a>(vec: &mut Vec<Name<'a>>, value: &Value<'a>) {
+    match value {
+        Value::Immediate(immediate) => push_names_immediate(vec, immediate),
+        Value::BinOp(_, left, right) => {
+            push_names_immediate(vec, left);
+            push_names_immediate(vec, right);
+        }
+        Value::Call(func, args) => {
+            push_names_ident(vec, func);
+            for arg in args {
+                push_names_immediate(vec, arg);
+            }
         }
     }
+}
 
-    fn push_idents_value(&mut self, value: &Value<'a>) {
-        match value {
-            Value::Immediate(immediate) => self.push_idents_immediate(immediate),
-            Value::BinOp(_, left, right) => {
-                self.push_idents_immediate(left);
-                self.push_idents_immediate(right);
-            }
-            Value::Call(func, args) => {
-                self.push_idents_ident(func);
-                for arg in args {
-                    self.push_idents_immediate(arg);
-                }
+fn push_names_label<'a>(vec: &mut Vec<Name<'a>>, label: &Label<'a>) {
+    push_names_ident(vec, &label.0);
+    for name in &label.1 {
+        vec.push(name.clone());
+    }
+}
+
+pub fn push_names_inst<'a>(vec: &mut Vec<Name<'a>>, inst: &Inst<'a>) {
+    match inst {
+        Inst::Label(..) => unreachable!(),
+        Inst::Let(_, value) => {
+            push_names_value(vec, value);
+        }
+        Inst::Set(ident, value) => {
+            push_names_value(vec, value);
+            push_names_ident(vec, ident);
+        }
+        Inst::Void(value) => push_names_value(vec, value),
+        Inst::Jump(label) => push_names_label(vec, label),
+        Inst::Branch(value, r#true, r#false) => {
+            push_names_value(vec, value);
+            push_names_label(vec, r#true);
+            push_names_label(vec, r#false);
+        }
+        Inst::Return(Some(immediate)) => push_names_immediate(vec, immediate),
+        Inst::Return(None) => (),
+    }
+}
+
+fn push_idents_ident<'a>(vec: &mut Vec<Ident<'a>>, ident: &Ident<'a>) {
+    vec.push(ident.clone());
+}
+
+fn push_idents_immediate<'a>(vec: &mut Vec<Ident<'a>>, immediate: &Immediate<'a>) {
+    match immediate {
+        Immediate::Int(..) => (),
+        Immediate::Ident(ident) => push_idents_ident(vec, ident),
+    }
+}
+
+fn push_idents_value<'a>(vec: &mut Vec<Ident<'a>>, value: &Value<'a>) {
+    match value {
+        Value::Immediate(immediate) => push_idents_immediate(vec, immediate),
+        Value::BinOp(_, left, right) => {
+            push_idents_immediate(vec, left);
+            push_idents_immediate(vec, right);
+        }
+        Value::Call(func, args) => {
+            push_idents_ident(vec, func);
+            for arg in args {
+                push_idents_immediate(vec, arg);
             }
         }
     }
+}
 
-    fn push_idents_label(&mut self, label: &Label<'a>) {
-        self.push_idents_ident(&label.0);
-        for named in &label.1 {
-            self.0.push(Ident::Named(named.clone()));
+fn push_idents_label<'a>(vec: &mut Vec<Ident<'a>>, label: &Label<'a>) {
+    push_idents_ident(vec, &label.0);
+    for name in &label.1 {
+        vec.push(Ident::Name(name.clone()));
+    }
+}
+
+pub fn push_idents_inst<'a>(vec: &mut Vec<Ident<'a>>, inst: &Inst<'a>) {
+    match inst {
+        Inst::Label(..) | Inst::Set(..) => unreachable!(),
+        Inst::Let(_, value) => {
+            push_idents_value(vec, value);
+        }
+        Inst::Void(value) => push_idents_value(vec, value),
+        Inst::Jump(label) => push_idents_label(vec, label),
+        Inst::Branch(value, r#true, r#false) => {
+            push_idents_value(vec, value);
+            push_idents_label(vec, r#true);
+            push_idents_label(vec, r#false);
+        }
+        Inst::Return(Some(immediate)) => push_idents_immediate(vec, immediate),
+        Inst::Return(None) => (),
+    }
+}
+
+fn push_mut_immediates_immediate<'a, 'b>(
+    vec: &mut Vec<&'b mut Immediate<'a>>,
+    immediate: &'b mut Immediate<'a>,
+) {
+    vec.push(immediate);
+}
+
+fn push_mut_immediates_value<'a, 'b>(
+    vec: &mut Vec<&'b mut Immediate<'a>>,
+    value: &'b mut Value<'a>,
+) {
+    match value {
+        Value::Immediate(immediate) => push_mut_immediates_immediate(vec, immediate),
+        Value::BinOp(_, left, right) => {
+            push_mut_immediates_immediate(vec, left);
+            push_mut_immediates_immediate(vec, right);
+        }
+        Value::Call(_, args) => {
+            for arg in args {
+                push_mut_immediates_immediate(vec, arg);
+            }
         }
     }
+}
 
-    pub fn push_idents_inst(&mut self, inst: &Inst<'a>) {
-        match inst {
-            Inst::Label(..) | Inst::Set(..) => unreachable!(),
-            Inst::Let(_, value) => {
-                self.push_idents_value(value);
-            }
-            Inst::Void(value) => self.push_idents_value(value),
-            Inst::Jump(label) => self.push_idents_label(label),
-            Inst::Branch(value, r#true, r#false) => {
-                self.push_idents_value(value);
-                self.push_idents_label(r#true);
-                self.push_idents_label(r#false);
-            }
-            Inst::Return(Some(immediate)) => self.push_idents_immediate(immediate),
-            Inst::Return(None) => (),
-        }
+pub fn push_mut_immediates_inst<'a, 'b>(
+    vec: &mut Vec<&'b mut Immediate<'a>>,
+    inst: &'b mut Inst<'a>,
+) {
+    match inst {
+        Inst::Label(..) | Inst::Set(..) => unreachable!(),
+        Inst::Let(_, value) | Inst::Void(value) => push_mut_immediates_value(vec, value),
+        Inst::Return(Some(immediate)) => push_mut_immediates_immediate(vec, immediate),
+        Inst::Jump(..) | Inst::Branch(..) | Inst::Return(None) => (),
     }
 }

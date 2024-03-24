@@ -1,5 +1,6 @@
 use crate::ast;
 use crate::ir;
+use crate::op;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -38,7 +39,7 @@ const fn make_immediate_expr_int<'a>(int: i64) -> ir::Immediate<'a> {
 }
 
 const fn make_ident_expr_ident(ident: &str) -> ir::Ident<'_> {
-    ir::Ident::Named(ir::Named(ident, None))
+    ir::Ident::Name(ir::Name(ident, None))
 }
 
 impl<'a> State<'a> {
@@ -136,10 +137,8 @@ impl<'a> State<'a> {
             }
             ast::Stmt::Let(ident, expr) => {
                 let value = self.make_value_expr(expr);
-                self.insts.push(ir::Inst::Let(
-                    ir::Ident::Named(ir::Named(ident, None)),
-                    value,
-                ));
+                self.insts
+                    .push(ir::Inst::Let(ir::Ident::Name(ir::Name(ident, None)), value));
             }
             ast::Stmt::Set(target, value) => {
                 let target = self.make_ident_expr(target);
@@ -181,40 +180,40 @@ impl<'a> State<'a> {
         }
     }
 
-    pub fn push_insts_named_func(&mut self, named_func: &ast::NamedFunc<'a>) {
-        let args = (named_func.1 .0)
+    pub fn push_insts_named_func(&mut self, name_func: &ast::NamedFunc<'a>) {
+        let args = (name_func.1 .0)
             .iter()
-            .map(|named| ir::Named(named, None))
+            .map(|name| ir::Name(name, None))
             .collect();
         self.insts.push(ir::Inst::Label(ir::Label(
-            ir::Ident::Named(ir::Named(named_func.0, None)),
+            ir::Ident::Name(ir::Name(name_func.0, None)),
             args,
         )));
-        self.push_insts_scope(&named_func.1 .1);
+        self.push_insts_scope(&name_func.1 .1);
     }
 
-    fn push_named_blocks(&self, blocks: &mut Blocks<'a>) {
+    fn push_labels_blocks(&self, blocks: &mut Blocks<'a>) {
         let mut labels = HashMap::new();
         let mut repeat = true;
 
         while repeat {
             for block in &mut blocks.0 {
-                let mut locals: HashSet<&ir::Named<'a>> = HashSet::new();
+                let mut locals: HashSet<&ir::Name<'a>> = HashSet::new();
                 for inst in &mut block.1 {
-                    let mut reads = ir::MutReads::new();
-                    reads.push_mut_reads_inst(inst);
-                    for named in reads.named {
-                        assert!(named.1.is_none());
-                        if locals.contains(named) {
+                    let mut names = vec![];
+                    ir::push_names_inst(&mut names, inst);
+                    for name in names {
+                        assert!(name.1.is_none());
+                        if locals.contains(&name) {
                             continue;
                         }
-                        if block.0 .1.contains(named) || self.globals.contains(named.0) {
+                        if block.0 .1.contains(&name) || self.globals.contains(name.0) {
                             continue;
                         }
-                        block.0 .1.push(named.clone());
+                        block.0 .1.push(name);
                     }
-                    if let ir::Inst::Let(ir::Ident::Named(named), _) = inst {
-                        locals.insert(named);
+                    if let ir::Inst::Let(ir::Ident::Name(name), _) = inst {
+                        locals.insert(name);
                     }
                 }
                 labels.insert(block.0 .0.clone(), block.0 .1.clone());
@@ -225,11 +224,11 @@ impl<'a> State<'a> {
                 for inst in &mut block.1 {
                     match inst {
                         ir::Inst::Jump(label) => {
-                            push_named_label(label, &labels, &mut repeat);
+                            push_labels_label(label, &labels, &mut repeat);
                         }
                         ir::Inst::Branch(_, r#true, r#false) => {
-                            push_named_label(r#true, &labels, &mut repeat);
-                            push_named_label(r#false, &labels, &mut repeat);
+                            push_labels_label(r#true, &labels, &mut repeat);
+                            push_labels_label(r#false, &labels, &mut repeat);
                         }
                         _ => (),
                     }
@@ -241,34 +240,29 @@ impl<'a> State<'a> {
     fn number_idents(&self, blocks: &mut Blocks<'a>) {
         let mut numbers = HashMap::new();
         for block in &mut blocks.0 {
-            for named in &mut block.0 .1 {
-                assert!(!self.globals.contains(named.0));
-                let k = numbers.get(named.0).map_or(0, |k| *k + 1);
-                numbers.insert(named.0, k);
-                named.1 = Some(k);
+            for name in &mut block.0 .1 {
+                assert!(!self.globals.contains(name.0));
+                let k = numbers.get(name.0).map_or(0, |k| *k + 1);
+                numbers.insert(name.0, k);
+                name.1 = Some(k);
             }
             for inst in &mut block.1 {
                 if let ir::Inst::Set(ident, value) = inst {
                     *inst = ir::Inst::Let(ident.clone(), value.clone());
                 }
 
-                let mut reads = ir::MutReads::new();
-                reads.push_mut_reads_inst(inst);
-                for named in reads.named {
-                    if self.globals.contains(named.0) {
+                let mut names = vec![];
+                ir::push_mut_names_inst(&mut names, inst);
+                for name in names {
+                    if self.globals.contains(name.0) {
                         continue;
                     }
-                    named.1 = Some(numbers[named.0]);
+                    name.1 = Some(numbers[name.0]);
                 }
-                for anonymous in reads.anonymous {
-                    if let ir::Anonymous::Value(..) = anonymous {
-                        todo!()
-                    }
-                }
-                if let ir::Inst::Let(ir::Ident::Named(named), _) = inst {
-                    let k = numbers.get(named.0).map_or(0, |k| *k + 1);
-                    numbers.insert(named.0, k);
-                    named.1 = Some(k);
+                if let ir::Inst::Let(ir::Ident::Name(name), _) = inst {
+                    let k = numbers.get(name.0).map_or(0, |k| *k + 1);
+                    numbers.insert(name.0, k);
+                    name.1 = Some(k);
                 }
             }
         }
@@ -277,17 +271,15 @@ impl<'a> State<'a> {
     fn check_blocks(&self, blocks: &Blocks<'a>) {
         for block in &blocks.0 {
             let mut locals = HashSet::new();
-            for named in &block.0 .1 {
-                assert!(locals.insert(ir::Ident::Named(named.clone())));
+            for name in &block.0 .1 {
+                assert!(locals.insert(ir::Ident::Name(name.clone())));
             }
             for inst in &block.1 {
-                let mut idents = ir::Idents::new();
-                idents.push_idents_inst(inst);
-                for ident in idents.0 {
+                let mut idents = vec![];
+                ir::push_idents_inst(&mut idents, inst);
+                for ident in idents {
                     match ident {
-                        ir::Ident::Named(ir::Named(named, None))
-                            if self.globals.contains(named) =>
-                        {
+                        ir::Ident::Name(ir::Name(name, None)) if self.globals.contains(name) => {
                             continue;
                         }
                         ir::Ident::Anonymous(ir::Anonymous::Label(_)) => continue,
@@ -303,16 +295,16 @@ impl<'a> State<'a> {
     }
 }
 
-fn push_named_label<'a>(
+fn push_labels_label<'a>(
     label: &mut ir::Label<'a>,
-    labels: &HashMap<ir::Ident<'a>, Vec<ir::Named<'a>>>,
+    labels: &HashMap<ir::Ident<'a>, Vec<ir::Name<'a>>>,
     repeat: &mut bool,
 ) {
-    for named in &labels[&label.0] {
-        if label.1.contains(named) {
+    for name in &labels[&label.0] {
+        if label.1.contains(name) {
             continue;
         }
-        label.1.push(named.clone());
+        label.1.push(name.clone());
         *repeat = true;
     }
 }
@@ -364,6 +356,9 @@ fn optimize(blocks: &mut Blocks<'_>) {
     loop {
         let mut count = 0;
         count += coalesce_jumps(blocks);
+        for block in &mut blocks.0 {
+            count += const_fold_block(block);
+        }
         count += remove_unused_idents_blocks(blocks);
         if count == 0 {
             break;
@@ -374,7 +369,7 @@ fn optimize(blocks: &mut Blocks<'_>) {
 impl<'a> From<&mut State<'a>> for Blocks<'a> {
     fn from(state: &mut State<'a>) -> Self {
         let mut blocks = Blocks::from(&state.insts[..]);
-        state.push_named_blocks(&mut blocks);
+        state.push_labels_blocks(&mut blocks);
         state.number_idents(&mut blocks);
         optimize(&mut blocks);
         state.check_blocks(&blocks);
@@ -426,14 +421,49 @@ fn coalesce_jumps(blocks: &mut Blocks<'_>) -> usize {
     remove_indices(&mut blocks.0, &indices[..])
 }
 
+fn const_fold_value(value: &mut ir::Value<'_>) -> usize {
+    if let ir::Value::BinOp(op::Op::Add, ir::Immediate::Int(left), ir::Immediate::Int(right)) =
+        value
+    {
+        *value = ir::Value::Immediate(ir::Immediate::Int(*left + *right));
+        1
+    } else {
+        0
+    }
+}
+
+fn const_fold_block(block: &mut Block<'_>) -> usize {
+    let mut consts = HashMap::new();
+    let mut count = 0;
+    for inst in &mut block.1 {
+        if let ir::Inst::Let(_, value) = inst {
+            count += const_fold_value(value);
+        }
+        if let ir::Inst::Let(ident, ir::Value::Immediate(immediate)) = inst {
+            consts.insert(ident.clone(), immediate.clone());
+        }
+        let mut immediates = vec![];
+        ir::push_mut_immediates_inst(&mut immediates, inst);
+        for immediate in immediates {
+            if let ir::Immediate::Ident(ident) = immediate {
+                if let Some(replacement) = consts.get(ident) {
+                    *immediate = replacement.clone();
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
 fn remove_unused_idents_blocks(blocks: &mut Blocks<'_>) -> usize {
-    let mut reads_named: HashSet<ir::Named> = HashSet::new();
-    for block in &mut blocks.0 {
-        for inst in &mut block.1 {
-            let mut reads = ir::MutReads::new();
-            reads.push_mut_reads_inst(inst);
-            for named in reads.named {
-                reads_named.insert(named.clone());
+    let mut reads_name: HashSet<ir::Name> = HashSet::new();
+    for block in &blocks.0 {
+        for inst in &block.1 {
+            let mut names = vec![];
+            ir::push_names_inst(&mut names, inst);
+            for name in names {
+                reads_name.insert(name);
             }
         }
     }
@@ -444,8 +474,8 @@ fn remove_unused_idents_blocks(blocks: &mut Blocks<'_>) -> usize {
     for block in &mut blocks.0 {
         {
             let mut indices = vec![];
-            for (i, named) in block.0 .1.iter().enumerate() {
-                if !reads_named.contains(named) {
+            for (i, name) in block.0 .1.iter().enumerate() {
+                if !reads_name.contains(name) {
                     indices.push(i);
                 }
             }
@@ -454,8 +484,8 @@ fn remove_unused_idents_blocks(blocks: &mut Blocks<'_>) -> usize {
         {
             let mut indices = vec![];
             for (i, inst) in block.1.iter().enumerate() {
-                if let ir::Inst::Let(ir::Ident::Named(named), _) = inst {
-                    if !reads_named.contains(named) {
+                if let ir::Inst::Let(ir::Ident::Name(name), _) = inst {
+                    if !reads_name.contains(name) {
                         indices.push(i);
                     }
                 }
@@ -483,13 +513,13 @@ fn remove_unused_idents_blocks(blocks: &mut Blocks<'_>) -> usize {
 
 fn remove_unused_idents_label<'a>(
     label: &mut ir::Label<'a>,
-    labels: &HashMap<ir::Ident<'a>, Vec<ir::Named<'a>>>,
+    labels: &HashMap<ir::Ident<'a>, Vec<ir::Name<'a>>>,
 ) -> usize {
     let mut indices = vec![];
-    for (i, named0) in label.1.iter().enumerate() {
+    for (i, name0) in label.1.iter().enumerate() {
         let mut found = false;
-        for named1 in &labels[&label.0] {
-            if named0.0 == named1.0 {
+        for name1 in &labels[&label.0] {
+            if name0.0 == name1.0 {
                 found = true;
                 break;
             }

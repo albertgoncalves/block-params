@@ -31,7 +31,9 @@ impl Call<'_> {
     fn display(&self, f: &mut fmt::Formatter, pad: usize) -> fmt::Result {
         let func = &self.0;
         let args = &self.1;
-        write!(f, "{func}(")?;
+        write!(f, "(")?;
+        func.display(f, pad)?;
+        write!(f, ")(")?;
         let mut args = args.iter();
         if let Some(arg) = args.next() {
             arg.display(f, pad)?;
@@ -70,7 +72,11 @@ impl Expr<'_> {
             Expr::BinOp(op, exprs) => {
                 let left = &exprs.0;
                 let right = &exprs.1;
-                write!(f, "({left} {op} {right})")
+                write!(f, "(")?;
+                left.display(f, pad)?;
+                write!(f, " {op} ")?;
+                right.display(f, pad)?;
+                write!(f, ")")
             }
             Expr::Call(call) => call.display(f, pad),
         }
@@ -106,7 +112,11 @@ impl Stmt<'_> {
                 scope.display(f, pad)
             }
             Stmt::Break => write!(f, "break;"),
-            Stmt::Return(Some(expr)) => write!(f, "return {expr};"),
+            Stmt::Return(Some(expr)) => {
+                write!(f, "return ")?;
+                expr.display(f, pad)?;
+                write!(f, ";")
+            }
             Stmt::Return(None) => write!(f, "return;"),
         }
     }
